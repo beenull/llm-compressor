@@ -1,0 +1,24 @@
+quant_stage:
+  quant_modifiers:
+    SpinQuantModifier:
+      rotations: ["R1", "R2"]
+      transform_block_size_R1: 1536   # hidden_size of Qwen3-VL 2B
+      learnable: True
+      transform_type: "random-hadamard"
+    QuantizationModifier:
+      ignore: ["re:.*lm_head", "re:.*visual.*"]
+      config_groups:
+        group_0:
+          weights:
+            observer: mse
+            observer_kwargs:
+              maxshrink: 0.1
+              patience: 10
+              averaging_constant: 0.05
+              grid: 128.0
+              norm: 2.0
+            num_bits: 4
+            type: int
+            symmetric: true
+            strategy: channel
+          targets: [Linear]
