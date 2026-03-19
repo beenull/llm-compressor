@@ -201,6 +201,68 @@ norm_mappings.NORM_MAPPING_REGISTRY["Qwen3VLForConditionalGeneration"] = [
 ]
 ```
 
+### 3.3 映射说明：旋转 vs 量化的区别
+
+**关键概念**: SpinQuant 映射中注册的 `embedding` 和 `lm_head` 是用于**旋转**（R1 scheme），不是用于量化。
+
+| 映射字段 | 指向模块 | 旋转 (SpinQuant) | 量化 (GPTQ) |
+|---|---|---|---|
+| `embedding` | `embed_tokens` | ✅ R1 旋转：`_center_embeddings()` 均值归零后乘 Hadamard 矩阵，让后续层输入分布更均匀 | ❌ 不量化（Embedding 层，不是 Linear） |
+| `lm_head` | `lm_head` | ✅ R1 旋转：作为 R1 scheme 尾端，保证旋转对称性 | ❌ 不量化（在 GPTQ ignore 列表中） |
+| `attn_q/k/v/o` | `q/k/v/o_proj` | ✅ R1+R2 旋转 | ✅ GPTQ W4 量化 |
+| `mlp_in/out` | `up/gate/down_proj` | ✅ R1+R4 旋转 | ✅ GPTQ W4 量化 |
+| `mm_proj` | `visual.merger.linear_fc2` | ✅ R1 旋转（视觉投影尾端） | ❌ 不量化（在 `re:.*visual.*` ignore 中） |
+
+### 3.4 QuaRot 与 SpinQuant 的关系
+
+框架中**没有独立的 QuaRotModifier**，统一用 `SpinQuantModifier`，通过 `learnable` 参数切换模式：
+
+| 参数 | QuaRot（非学习） | OSTQuant / SpinQuant（可学习） |
+|---|---|---|
+| `learnable` | `False`（默认值，YAML 中不写即为 False） | `True` |
+| `transform_type` | `"hadamard"`（固定 Hadamard 矩阵） | `"random-hadamard"`（随机初始化，可学习） |
+| 是否需要训练 | ❌ datafree（旋转步骤不需要数据） | ✅ FSDP + KL 蒸馏训练 |
+| 旋转矩阵 | 固定，不更新 | 通过 STE 梯度在 Stiefel 流形上优化 |
+| 对应配置 | `quarot_gptq.yaml` | `ostquant_train.yaml` |
+
+因此 `quarot_gptq.py` 和 `ostquant_train.py` 都需要 `from llmcompressor.modifiers.transform.spinquant import mappings, norm_mappings` 来注册模型映射，这是标准做法。v5/Qwen2.5-VL 的官方例子也是同样模式。
+
+### 3.5 映射注册的调用机制
+
+`quarot_gptq.py` 中看不到显式调用 mappings 的代码，但注册到全局 dict 后会被 `oneshot()` 内部自动使用。完整调用链路：
+
+```
+① quarot_gptq.py 顶层执行:
+   mappings.SPINQUANT_MAPPING_REGISTRY["Qwen3VLForConditionalGeneration"] = SpinQuantMapping(...)
+   norm_mappings.NORM_MAPPING_REGISTRY["Qwen3VLForConditionalGeneration"] = [...]
+       ↓ (写入全局 dict，Python 模块级别的可变对象)
+
+② oneshot(model=hf_model, recipe="quarot_gptq.yaml") 内部:
+       ↓
+   SpinQuantModifier.on_initialize(state)     # state.model = hf_model
+       ↓
+   self.mappings = infer_mapping_from_model(state.model)
+       ↓
+   infer_mapping_from_model() 内部:
+       architecture = model.__class__.__name__   # → "Qwen3VLForConditionalGeneration"
+       return SPINQUANT_MAPPING_REGISTRY.get(architecture, _default_mappings)
+       # → 命中步骤①注册的映射
+       ↓
+   self.norm_mappings = infer_norm_mapping_from_model(state.model)  # 同理
+       ↓
+③ 用 self.mappings 构建各旋转 scheme:
+   _create_r1_scheme() → 引用 mappings.embedding, attn_o, mlp_out, attn_q/k/v, mlp_in, lm_head
+   _create_r2_scheme() → 引用 mappings.attn_v, attn_o
+   _create_r4_scheme() → 引用 mappings.mlp_in, mlp_out
+       ↓
+④ on_start() 中:
+   _center_embeddings() → 使用 mappings.embedding 定位 embed_tokens 做均值归零
+   _fuse_norms()         → 使用 norm_mappings 定位 RMSNorm 融入相邻 Linear
+   apply_transform_config() → 插入旋转矩阵到对应层
+```
+
+**关键**: 映射注册必须在 `oneshot()` 调用之前完成，因为 `on_initialize` 在 `oneshot` 内部第一步就会查询 registry。
+
 ---
 
 ## 4. Step 1: QuaRot + GPTQ
@@ -326,17 +388,30 @@ python examples/qwen3vl_quant/ostquant_postquant.py
 
 ### 6.1 GPTQ 校准数据
 
-使用文本数据即可 (纯 language model 的量化):
+使用纯文本数据即可，对 Internal 模型没有负面影响。原因：
+
+1. **量化目标是 `hf_model`**（`Qwen3VLForConditionalGeneration`），不是 `OmniQwen3VLMedusaModel`。GPTQ 校准只需 `hf_model.forward(input_ids)` 跑通即可
+2. **语言模型完全复用**。Internal 模型的 language decoder 与开源 Qwen3-VL-2B 一模一样，文本 token 走的路径完全相同
+3. **audio token 只是扩展词表中的普通 token**。`<audio_667>` 编码后就是一个 vocab id，走 `embed_tokens → decoder layers → lm_head` 的路径与文本 token 完全一致
+4. **v5 例子也用文本数据**。`v5_example.py` 对 Qwen2.5-VL 的 GPTQ 量化同样用纯文本校准
 
 ```python
-# 选项 A: 通用文本数据
+# 当前方案: 通用文本数据 (已验证可行)
 ds = load_dataset("hkust-nlp/deita-6k-v0", split="train[:256]")
-
-# 选项 B: 自定义 VL 数据 (更贴合使用场景)
-ds = load_dataset("lmms-lab/LLaVA-OneVision-Data", "FigureQA(MathV360K)", split="train[:128]")
 ```
 
-### 6.2 OSTQuant 训练数据
+### 6.2 可选优化: 混合 audio 数据校准
+
+如需让量化对 audio 场景更精准，可混入 audio token 数据做校准（**TODO: 跑通全流程后评估是否需要**）：
+
+```python
+# 可选: 构造包含 audio token 的校准样本
+audio_prompts = ["<|ATQTA|>...<audio_667><audio_993>..."]
+ds_audio = tokenize_audio_prompts(audio_prompts)
+ds = concatenate_datasets([ds_text, ds_audio])
+```
+
+### 6.3 OSTQuant 训练数据
 
 同 GPTQ 校准数据，建议混合使用文本和 VL 数据:
 
@@ -499,3 +574,16 @@ examples/qwen3vl_quant/
 ├── ostquant_train.py             # Step 2 Phase1: OSTQuant 训练 (多卡)
 └── ostquant_postquant.py         # Step 2 Phase2: R4 + GPTQ 后量化 (单卡)
 ```
+
+---
+
+## 12. TODO List
+
+- [ ] **跑通 QuaRot+GPTQ 全流程** — 去掉 `--skip-quant`，运行完整量化 + 保存
+- [ ] **量化后 ATQTA 推理验证** — 确认量化后模型生成质量
+- [ ] **评估是否需要混合 audio 数据做 GPTQ 校准** — 对比纯文本 vs 混合数据的量化精度
+- [ ] **ostquant_train.py 适配内部 Omni 模型** — 改用 `build_model()` 加载，提取 `.language_model`
+- [ ] **ostquant_postquant.py 适配** — tokenizer 路径等更新
+- [ ] **OSTQuant Phase 1 训练** — FSDP 多卡训练 R1+R2
+- [ ] **OSTQuant Phase 2 后量化** — R4+GPTQ
+- [ ] **最终精度评估** — QuaRot vs OSTQuant 量化后精度对比
