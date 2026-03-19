@@ -14,6 +14,7 @@ Usage:
 """
 
 import argparse
+import logging
 import os
 import sys
 
@@ -22,6 +23,18 @@ from datasets import load_dataset
 
 from llmcompressor import oneshot
 from llmcompressor.modifiers.transform.spinquant import mappings, norm_mappings
+
+# DEBUG 模式: DEBUG=true python ... 时才输出调试信息
+DEBUG = os.environ.get("DEBUG", "").lower() in ("1", "true", "yes")
+
+if not DEBUG:
+    logging.disable(logging.INFO)
+
+
+def dprint(*args, **kwargs):
+    """仅在 DEBUG=true 时打印"""
+    if DEBUG:
+        print(*args, **kwargs)
 
 # 本地依赖 (从 xllm-evaluation 拷贝)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -99,7 +112,7 @@ def run_atqta_infer(omni_model, tokenizer, device):
         tokenizer: 扩展 tokenizer
         device: 推理设备
     """
-    print("\n=== ATQTA Multi-turn Inference Test ===")
+    dprint("\n=== ATQTA Multi-turn Inference Test ===")
     messages = [
         {"role": "user", "content": "", "content_audio": ATQTA_TEST_PROMPT},
     ]
@@ -110,7 +123,7 @@ def run_atqta_infer(omni_model, tokenizer, device):
         add_generation_prompt=True,
         device=device,
     )
-    print("ATQTA Prompt IDs shape:", inputs.input_ids.shape)
+    dprint("ATQTA Prompt IDs shape:", inputs.input_ids.shape)
 
     generate_output = omni_model.generate(
         prompt_ids=inputs.input_ids,
@@ -119,12 +132,12 @@ def run_atqta_infer(omni_model, tokenizer, device):
         do_sample=False,
     )
 
-    print("\nGenerated Tokens:", generate_output["generated_tokens"])
-    print(
+    dprint("\nGenerated Tokens:", generate_output["generated_tokens"])
+    dprint(
         "\nGenerated Text:",
         tokenizer.decode(generate_output["generated_tokens"][0], skip_special_tokens=True),
     )
-    print("=== ATQTA Test Done ===\n")
+    dprint("=== ATQTA Test Done ===\n")
 
 
 # =====================================================
@@ -145,7 +158,8 @@ def main():
     parser.add_argument(
         "--omni-model-ckpt",
         type=str,
-        default="/workspace/gaoy25@xiaopeng.com/model/group_share/adc-perception-xbrain/malf/omni/hf2aif_0304_final_resave.pt",
+        default="/workspace/gaoy25@xiaopeng.com/model/group_share/adc-perception-mlinfra/malf/omni/hf2aif_0304_final_resave.pt",
+        
     )
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--skip-quant", action="store_true", help="跳过量化，只做推理测试")
@@ -154,7 +168,7 @@ def main():
     # =================================================
     # Step 1: 用内部 build_model 构建 OmniQwen3VLMedusaModel
     # =================================================
-    print(f"[Step 1] Building Omni model from {args.omni_model_name}...")
+    dprint(f"[Step 1] Building Omni model from {args.omni_model_name}...")
     omni_model, tokenizer = build_model(
         omni_model_name=args.omni_model_name,
         omni_model_tokenizer_path=args.omni_model_tokenizer,
@@ -169,17 +183,17 @@ def main():
     # =================================================
     # Step 2: 量化前先跑 ATQTA 推理 (baseline 对比)
     # =================================================
-    print("\n[Step 2] Running ATQTA inference BEFORE quantization...")
+    dprint("\n[Step 2] Running ATQTA inference BEFORE quantization...")
     run_atqta_infer(omni_model, tokenizer, args.device)
 
     if args.skip_quant:
-        print("[INFO] --skip-quant specified, skipping quantization.")
+        dprint("[INFO] --skip-quant specified, skipping quantization.")
         return
 
     # =================================================
     # Step 3: 准备校准数据 (纯文本)
     # =================================================
-    print("[Step 3] Preparing calibration data...")
+    dprint("[Step 3] Preparing calibration data...")
     ds = load_dataset("hkust-nlp/deita-6k-v0", split=f"train[:{NUM_CALIBRATION_SAMPLES}]")
     ds = ds.shuffle(seed=42)
 
@@ -206,7 +220,7 @@ def main():
     # =================================================
     # Step 4: 执行 QuaRot + GPTQ oneshot 量化
     # =================================================
-    print("[Step 4] Running QuaRot + GPTQ quantization...")
+    dprint("[Step 4] Running QuaRot + GPTQ quantization...")
     oneshot(
         model=hf_model,
         dataset=ds,
@@ -219,13 +233,13 @@ def main():
     # =================================================
     # Step 5: 量化后跑 ATQTA 推理 (验证量化正确性)
     # =================================================
-    print("\n[Step 5] Running ATQTA inference AFTER quantization...")
+    dprint("\n[Step 5] Running ATQTA inference AFTER quantization...")
     run_atqta_infer(omni_model, tokenizer, args.device)
 
     # =================================================
     # Step 6: 保存量化模型
     # =================================================
-    print(f"[Step 6] Saving quantized model to {SAVE_DIR}...")
+    dprint(f"[Step 6] Saving quantized model to {SAVE_DIR}...")
     from llmcompressor.transformers.compression.compressed_tensors_utils import (
         modify_save_pretrained,
     )
@@ -233,7 +247,7 @@ def main():
     modify_save_pretrained(hf_model)
     hf_model.save_pretrained(SAVE_DIR, save_compressed=True)
     tokenizer.save_pretrained(SAVE_DIR)
-    print(f"Quantized model saved to {SAVE_DIR}")
+    dprint(f"Quantized model saved to {SAVE_DIR}")
 
 
 if __name__ == "__main__":
