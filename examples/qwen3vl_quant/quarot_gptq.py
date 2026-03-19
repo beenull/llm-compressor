@@ -6,10 +6,14 @@ Qwen3-VL 2B (内部 Omni 模型): QuaRot (R1+R2+R4) + GPTQ W4 量化脚本
 量化后运行 ATQTA multi-turn 推理验证正确性。
 
 Usage:
-    python examples/qwen3vl_quant/quarot_gptq.py \
-        --omni-model-name /publicdata/huggingface.co/Qwen/Qwen3-VL-2B-Instruct \
-        --omni-model-tokenizer /workspace/group_share/adc-perception-mlinfra/shijh2/qwen3_vl_extend \
-        --omni-model-ckpt /workspace/group_share/adc-perception-xbrain/malf/omni/hf2aif_0304_final_resave.pt \
+    # 静默模式
+    python examples/qwen3vl_quant/quarot_gptq.py --skip-quant
+
+    # 调试模式 (输出全部日志)
+    DEBUG=true python examples/qwen3vl_quant/quarot_gptq.py \
+        --omni-model-name /workspace/gaoy25@xiaopeng.com/model/qwen3_vl/Qwen3-VL-2B-Instruct \
+        --omni-model-tokenizer /workspace/gaoy25@xiaopeng.com/model/group_share/adc-perception-mlinfra/shijh2/qwen3_vl_extend \
+        --omni-model-ckpt /workspace/gaoy25@xiaopeng.com/model/group_share/adc-perception-mlinfra/malf/omni/hf2aif_0304_final_resave.pt \
         --device cuda:0
 """
 

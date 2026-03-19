@@ -13,60 +13,139 @@
 
 ---
 
-## 2. Qwen3-VL 2B 模型结构
+## 2. Qwen3-VL 2B Internal 模型结构
 
-### 2.1 模型参数
+> 以下结构严格对应 `xllm-evaluation/docs/qwen3_vl_internal_infer_pipeline.md` 中的实际架构。
 
-| 参数 | 值 |
-|---|---|
-| 模型类名 | `Qwen3VLForConditionalGeneration` |
-| hidden_size | 1536 |
-| num_layers | 28 |
-| num_attention_heads | 12 |
-| num_kv_heads | 2 |
-| intermediate_size | 8960 |
-| Decoder Layer 类名 | `Qwen3VLTextDecoderLayer` |
-| Norm 类型 | RMSNorm |
+### 2.1 整体架构
 
-### 2.2 模型层级路径
+实际使用的不是裸 `Qwen3VLForConditionalGeneration`，而是 **`OmniQwen3VLMedusaModel`** 包装器：
+
+Qwen3-VL 2B Internal 本质上与开源 Qwen3-VL-2B-Instruct 区别不大，**语言模型部分完全复用**，主要差异在于：
+
+- **骨干网络**: 复用 Qwen3-VL-2B-Instruct 的 language model (decoder-only transformer)，**ViT 视觉编码器未启用**
+- **词表扩展**: 原始文本词表 + audio token (`<audio_0>` ~ `<audio_5120+>`)，统一词表编解码
+- **MTP 加速**: 在骨干 LM 之上增加 Medusa 多头 (4 heads)，推测解码每步预测 5 个 token
+- **不包含 audio tokenizer**: audio token 由外部预处理，作为文本形式输入
+
+**量化影响**: 由于语言模型部分完全复用，量化流程与直接量化开源 Qwen3-VL-2B 无本质区别。Medusa heads 和扩展词表不参与量化。
+
+### 2.2 三件套输入
+
+模型加载需要三个独立组件：
+
+| 组件 | 参数名 | 说明 |
+|---|---|---|
+| **HF 模型结构** | `--omni-model-name` | 标准 Qwen3-VL-2B-Instruct，提供模型结构+config，用 `from_pretrained` 加载后被 checkpoint 覆盖 |
+| **扩展 Tokenizer** | `--omni-model-tokenizer` | 在原始 Qwen3-VL tokenizer 基础上扩展了 audio token 的词表 |
+| **自定义 Checkpoint** | `--omni-model-ckpt` | 包含训练后的 language_model 权重 + lm_head (扩展词表) + medusa_head 权重 |
+
+**加载顺序**:
+1. `Qwen3VLForConditionalGeneration.from_pretrained(omni_model_name)` → 标准 HF 模型
+2. 从 checkpoint 的 `lm_head.weight` 推断 `vocab_size` 和 `hidden_size`
+3. `resize_token_embeddings(vocab_size)` → 扩展 embed_tokens 和 lm_head 到新词表大小
+4. 构建 `OmniQwen3VLMedusaModel` 包装器 + Medusa heads
+5. `load_state_dict(checkpoint, strict=False)` → 加载所有权重
+
+### 2.3 完整模型层级路径
 
 ```
-Qwen3VLForConditionalGeneration
-├── model: Qwen3VLModel
-│   ├── visual: Qwen3VLVisionModel         ← 量化时 ignore
+OmniQwen3VLMedusaModel (nn.Module)                    ← 我们 build_model() 返回的对象
+│
+├── language_model: Qwen3VLForConditionalGeneration    ← 量化目标 (omni_model.language_model)
+│   ├── visual: Qwen3VLVisionModel                    ← ⚠️ 未使用，ckpt 中跳过
 │   │   ├── patch_embed / pos_embed
 │   │   ├── blocks[i]: Qwen3VLVisionBlock
 │   │   │   ├── norm1 / norm2 (LayerNorm)
 │   │   │   ├── attn.qkv / attn.proj
 │   │   │   └── mlp.linear_fc1 / linear_fc2
-│   │   ├── merger
-│   │   └── deepstack_merger_list          ★ Qwen3-VL 新增
-│   └── language_model: Qwen3VLTextModel   ★ 保留 language_model 前缀 (同 Qwen2.5-VL)
-│       ├── embed_tokens
-│       ├── layers[i]: Qwen3VLTextDecoderLayer
-│       │   ├── input_layernorm (RMSNorm)
-│       │   ├── self_attn
-│       │   │   ├── q_proj / k_proj / v_proj / o_proj
-│       │   │   ├── q_norm / k_norm          ★ Qwen3-VL 新增 (RMSNorm on head_dim)
-│       │   ├── post_attention_layernorm (RMSNorm)
-│       │   └── mlp
-│       │       ├── gate_proj / up_proj / down_proj
-│       ├── norm (RMSNorm)
-│       └── rotary_emb
-└── lm_head
+│   │   ├── merger                                     ← SpinQuant mm_proj 指向这里
+│   │   └── deepstack_merger_list                      ★ Qwen3-VL 新增
+│   ├── model: Qwen3VLModel
+│   │   └── language_model: Qwen3VLTextModel           ← 核心 decoder
+│   │       ├── embed_tokens: Embedding(vocab_size_extended, 1536)
+│   │       ├── layers[i]: Qwen3VLTextDecoderLayer × 28
+│   │       │   ├── input_layernorm (RMSNorm)
+│   │       │   ├── self_attn
+│   │       │   │   ├── q_proj / k_proj / v_proj / o_proj
+│   │       │   │   └── q_norm / k_norm                ★ Qwen3-VL 新增 (RMSNorm on head_dim)
+│   │       │   ├── post_attention_layernorm (RMSNorm)
+│   │       │   └── mlp
+│   │       │       └── gate_proj / up_proj / down_proj
+│   │       ├── norm (RMSNorm)
+│   │       └── rotary_emb
+│   └── lm_head: Linear(1536, vocab_size_extended, bias=False)
+│
+└── medusa_head: ModuleList[4 个推测解码头]             ← 不参与量化
+    └── Sequential:
+        ├── ResBlock(1536)     ← 残差块: x + SiLU(Linear(x)), 零初始化
+        └── Linear(1536, vocab_size_extended, bias=False)
 ```
 
-### 2.3 与 Qwen2.5-VL 的关键差异
+### 2.4 关键维度
 
-| 特性 | Qwen2.5-VL | Qwen3-VL |
+| 参数 | 值 |
+|---|---|
+| 外层包装类名 | `OmniQwen3VLMedusaModel` |
+| 骨干模型类名 | `Qwen3VLForConditionalGeneration` |
+| hidden_size | 1536 |
+| num_layers | 28 |
+| num_attention_heads | 12 |
+| num_key_value_heads | 2 (GQA) |
+| intermediate_size | 8960 |
+| vocab_size (原始) | 151665 |
+| vocab_size (扩展后) | ~156785+ (从 ckpt lm_head 推断) |
+| Decoder Layer 类名 | `Qwen3VLTextDecoderLayer` |
+| Norm 类型 | RMSNorm |
+| medusa_heads | 4 |
+| medusa_layers (ResBlock) | 1 |
+
+### 2.5 Checkpoint Key 映射
+
+Checkpoint key 格式与 HF 模型不完全一致，`_remap_checkpoint_keys` 执行以下变换：
+
+```python
+# 1. 跳过视觉编码器
+if key.startswith("language_model.visual.") or key.startswith("vision_encoder"):
+    continue  # 不加载 ViT 权重
+
+# 2. Language model 权重重映射 (多了一层 language_model)
+"language_model.model.xxx" → "language_model.model.language_model.xxx"
+# 例: ckpt 中 language_model.model.layers.0.self_attn.q_proj.weight
+# → HF 中 language_model.model.language_model.layers.0.self_attn.q_proj.weight
+
+# 3. 其他 key 保持不变
+"language_model.lm_head.weight" → 不变
+"medusa_head.0.0.linear.weight" → 不变
+```
+
+### 2.6 量化目标与量化无关部分
+
+| 组件 | 路径 | 量化处理 |
 |---|---|---|
-| 路径前缀 | `model.language_model.layers.{i}` | **完全一致** ✅ |
-| Decoder Layer 类名 | `Qwen2_5_VLDecoderLayer` | `Qwen3VLTextDecoderLayer` |
+| **Language Decoder** | `language_model.model.language_model.layers[i]` | ✅ 量化目标 (SpinQuant + GPTQ) |
+| **lm_head** | `language_model.lm_head` | ❌ ignore (SpinQuant 映射中引用但不量化) |
+| **embed_tokens** | `language_model.model.language_model.embed_tokens` | ❌ ignore |
+| **ViT Visual** | `language_model.visual.*` | ❌ ignore (`re:.*visual.*`) |
+| **Medusa Heads** | `medusa_head.*` | ❌ 不参与量化 (在 OmniModel 层，不在 HF model 内) |
+| **q_norm / k_norm** | `language_model.model.language_model.layers[i].self_attn.{q,k}_norm` | ❌ 安全忽略 (RMSNorm on head_dim，SpinQuant 旋转不影响) |
+
+**关键**: `quarot_gptq.py` 中提取 `hf_model = omni_model.language_model` 后，对 `hf_model` (即 `Qwen3VLForConditionalGeneration`) 做量化。Medusa heads 在外层 `OmniQwen3VLMedusaModel` 上，不受影响。
+
+### 2.7 与 Qwen2.5-VL 的关键差异
+
+| 特性 | Qwen2.5-VL | Qwen3-VL (内部 Omni) |
+|---|---|---|
+| 实际使用模型 | 裸 HF model | `OmniQwen3VLMedusaModel` 包装 |
+| 量化骨干路径 | `model.language_model.layers.{i}` | **完全一致** ✅ |
+| Decoder Layer 类名 | `Qwen2_5_VLDecoderLayer` | `Qwen3VLDecoderLayer` |
 | QK Norm | ❌ | ✅ `q_norm` + `k_norm` |
 | Vision DeepStack | ❌ | ✅ `deepstack_merger_list` |
+| 词表 | 原始 | 扩展 (audio tokens) |
+| Medusa MTP | ❌ | ✅ 4 heads (不参与量化) |
 | SpinQuant regex | `re:.*language_model.*q_proj$` | **可复用** ✅ |
 
-**结论**: SpinQuant/Norm 映射 regex 可直接从 Qwen2.5-VL 复用，只需更改注册 key。
+**结论**: SpinQuant/Norm 映射 regex 可直接从 Qwen2.5-VL 复用，只需更改注册 key。量化时需注意通过 `omni_model.language_model` 提取 HF 骨干模型。
 
 ---
 
@@ -327,3 +406,96 @@ examples/qwen3vl_quant/
 3. **R1 block_size**: 必须设为 hidden_size (1536)，否则旋转维度不匹配。
 4. **sequential_targets**: GPTQ 的 sequential onloading 需要指定 `Qwen3VLTextDecoderLayer` (不是 Qwen2.5-VL 的 `Qwen2_5_VLDecoderLayer`)。
 5. **模型路径**: 需替换为实际的模型路径 (`MODEL_ID`) 和保存路径 (`SAVE_DIR`)。
+
+---
+
+## 11. 云端部署调试记录 (XP A100)
+
+### 11.1 云端环境信息
+
+| 项目 | 值 |
+|---|---|
+| 平台 | XP A100 (cnwlb-a100-p01046) |
+| Python | 3.10 |
+| llm-compressor | `/workspace/gaoy25@xiaopeng.com/gytmp/quant/llm-compressor` |
+| compressed-tensors | `/workspace/gaoy25@xiaopeng.com/gytmp/quant/compressed-tensors` (自定义 fork) |
+
+### 11.2 云端模型路径
+
+```
+--omni-model-name      /workspace/gaoy25@xiaopeng.com/model/qwen3_vl/Qwen3-VL-2B-Instruct
+--omni-model-tokenizer /workspace/gaoy25@xiaopeng.com/model/group_share/adc-perception-mlinfra/shijh2/qwen3_vl_extend
+--omni-model-ckpt      /workspace/gaoy25@xiaopeng.com/model/group_share/adc-perception-mlinfra/malf/omni/hf2aif_0304_final_resave.pt
+```
+
+### 11.3 环境安装步骤
+
+```bash
+# 1. compressed-tensors (自定义 SpinQuant fork)
+cd /workspace/gaoy25@xiaopeng.com/gytmp/quant/compressed-tensors
+pip install -e .
+
+# 2. llm-compressor
+cd /workspace/gaoy25@xiaopeng.com/gytmp/quant/llm-compressor
+pip install -e .
+
+# 3. transformers >= 4.57.0 (支持 Qwen3VLForConditionalGeneration)
+pip install transformers>=4.57.0
+
+# 4. numpy 版本锁定 (解决 scipy/pandas 兼容性)
+pip install numpy==1.26.4 scipy pandas --force-reinstall
+
+# 5. 其他依赖
+pip install datasets qwen-vl-utils easydict loguru trl
+```
+
+### 11.4 遇到的问题及解决
+
+| # | 错误 | 原因 | 解决 |
+|---|---|---|---|
+| 1 | `ModuleNotFoundError: No module named 'datasets'` | 未安装 | `pip install datasets` |
+| 2 | `ModuleNotFoundError: No module named 'llmcompressor'` | 未安装 | `cd llm-compressor && pip install -e .` |
+| 3 | `numpy.dtype size changed, expected 96 from C header, got 88` | numpy 版本与编译的 scipy/pandas 不兼容 | `pip install numpy==1.26.4 scipy pandas --force-reinstall` |
+| 4 | `ImportError: attempted relative import with no known parent package` | `build_model.py` 使用 `from .omni_qwen3vl_medusa import` 但通过 `sys.path` 调用 | 改为 `from omni_qwen3vl_medusa import` (绝对导入) |
+| 5 | `HFValidationError: Repo id must be in the form 'repo_name' or 'namespace/repo_name'` | `AutoTokenizer.from_pretrained()` 把本地路径当 HF Hub repo_id 校验 | 加 `local_files_only=True` |
+
+### 11.5 DEBUG 模式
+
+脚本内置 DEBUG 开关，通过环境变量控制：
+
+```bash
+# 静默模式 (默认) — 无调试输出
+python examples/qwen3vl_quant/quarot_gptq.py --skip-quant
+
+# 调试模式 — 输出所有 step 日志、prompt 内容、生成结果
+DEBUG=true python examples/qwen3vl_quant/quarot_gptq.py --skip-quant
+```
+
+实现方式：
+- `quarot_gptq.py`: 所有 `print()` 替换为 `dprint()`，仅 `DEBUG=true` 时输出；非 DEBUG 时 `logging.disable(logging.INFO)` 屏蔽库日志
+- `build_prompt.py`: 非 DEBUG 时移除 loguru 默认 handler，设为 WARNING 级别，屏蔽 `logger.info()` 的 prompt 打印
+
+### 11.6 验证通过的命令
+
+```bash
+# --skip-quant 模式: 构建内部 Omni 模型 → ATQTA 推理测试 (不做量化)
+DEBUG=true python examples/qwen3vl_quant/quarot_gptq.py --skip-quant
+```
+
+### 11.7 文件清单 (更新)
+
+```
+examples/qwen3vl_quant/
+├── __init__.py                   # 空 init
+├── configs/
+│   ├── quarot_gptq.yaml          # QuaRot(R1+R2+R4) + GPTQ W4
+│   ├── ostquant_train.yaml       # OSTQuant Phase1: R1+R2 learnable + fake-quant
+│   ├── r4_gptq.yaml              # OSTQuant Phase2: R4 + GPTQ W4
+│   └── train.yaml                # OSTQuant FSDP 训练参数
+├── omni_qwen3vl_medusa.py        # OmniQwen3VLMedusaModel 类 (从 xllm-evaluation 拷贝)
+├── build_model.py                # 模型构建 (从 xllm-evaluation 拷贝, 已改为绝对导入)
+├── build_prompt.py               # Prompt 构建 (从 xllm-evaluation 拷贝, 含 DEBUG 控制)
+├── quarot_gptq.py                # Step 1: QuaRot + GPTQ (单卡, 含 DEBUG 模式)
+├── ostquant_train.py             # Step 2 Phase1: OSTQuant 训练 (多卡)
+└── ostquant_postquant.py         # Step 2 Phase2: R4 + GPTQ 后量化 (单卡)
+```
