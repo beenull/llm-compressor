@@ -5,8 +5,15 @@ Prompt 构建模块。
 从 xllm-evaluation/xllm_eval/build_prompt.py 拷贝。
 """
 
+import os
+
 import torch
 from loguru import logger
+
+# 非 DEBUG 模式下屏蔽 loguru INFO 日志
+if os.environ.get("DEBUG", "").lower() not in ("1", "true", "yes"):
+    logger.remove()
+    logger.add(lambda msg: None, level="WARNING")
 
 
 SYSTEM_PROMPTS = {
