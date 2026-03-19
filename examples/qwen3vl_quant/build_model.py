@@ -8,7 +8,7 @@ Omni 模型构建模块。
 import torch
 from transformers import AutoTokenizer
 
-from .omni_qwen3vl_medusa import OmniQwen3VLMedusaModel
+from omni_qwen3vl_medusa import OmniQwen3VLMedusaModel
 
 
 def build_model(
@@ -28,7 +28,7 @@ def build_model(
     """
 
     omni_model_tokenizer = AutoTokenizer.from_pretrained(
-        omni_model_tokenizer_path, trust_remote_code=True
+        omni_model_tokenizer_path, trust_remote_code=True, local_files_only=True
     )
 
     omni_model = OmniQwen3VLMedusaModel.from_checkpoint(

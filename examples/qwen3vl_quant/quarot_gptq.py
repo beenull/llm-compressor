@@ -135,17 +135,17 @@ def main():
     parser.add_argument(
         "--omni-model-name",
         type=str,
-        default="/publicdata/huggingface.co/Qwen/Qwen3-VL-2B-Instruct",
+        default="/workspace/gaoy25@xiaopeng.com/model/qwen3_vl/Qwen3-VL-2B-Instruct",
     )
     parser.add_argument(
         "--omni-model-tokenizer",
         type=str,
-        default="/workspace/group_share/adc-perception-mlinfra/shijh2/qwen3_vl_extend",
+        default="/workspace/gaoy25@xiaopeng.com/model/group_share/adc-perception-mlinfra/shijh2/qwen3_vl_extend",
     )
     parser.add_argument(
         "--omni-model-ckpt",
         type=str,
-        default="/workspace/group_share/adc-perception-xbrain/malf/omni/hf2aif_0304_final_resave.pt",
+        default="/workspace/gaoy25@xiaopeng.com/model/group_share/adc-perception-xbrain/malf/omni/hf2aif_0304_final_resave.pt",
     )
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--skip-quant", action="store_true", help="跳过量化，只做推理测试")
