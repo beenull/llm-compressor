@@ -1,10 +1,12 @@
 quant_stage:
   quant_modifiers:
     SpinQuantModifier:
+      backe_mean: True
+      learnable: False
       rotations: ["R1", "R2", "R4"]
       transform_block_size_R1: 1536   # hidden_size of Qwen3-VL 2B
       transform_block_size_R4: 256
-      transform_type: "hadamard"
+      transform_type: "hadamard"  # "random-hadamard" or "hadamard"
     GPTQModifier:
       ignore: ["re:.*lm_head", "re:.*visual.*"]
       actorder: null
