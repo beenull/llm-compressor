@@ -236,20 +236,17 @@ def main():
 
     # 提取内部的 Qwen3VLForConditionalGeneration 用于量化
     # omni_model.language_model 就是 Qwen3VLForConditionalGeneration
+
     hf_model = omni_model.language_model
-    
-
-
     # =================================================
     # Step 2: 量化前先跑 ATQTA 推理 (baseline 对比)
     # =================================================
-    dprint("\n[Step 2] Running ATQTA inference BEFORE quantization...")
+    dprint("\n✅  [Step 2] Running ATQTA inference 【BEFORE】 quantization...")
     run_atqta_infer(omni_model, tokenizer, args.device)
 
     if args.skip_quant:
         dprint("[INFO] --skip-quant specified, skipping quantization.")
         return
-
 
     # =================================================
     # Step 3: 准备校准数据 (支持 text/vit 多模态)
@@ -310,16 +307,11 @@ def main():
             truncation=True,
         )
 
-
     ds = ds.map(tokenize, remove_columns=ds.column_names)
-
     # =================================================
     # Step 4: 执行 QuaRot + GPTQ oneshot 量化
     # =================================================
     
-
-    import pdb
-    pdb.set_trace()
     # 把 text_config 中的关键字段复制到顶层 config
     text_config = hf_model.config.text_config
     hf_model.config.head_dim = text_config.head_dim
@@ -327,8 +319,10 @@ def main():
     hf_model.config.num_attention_heads = text_config.num_attention_heads
     hf_model.config.num_key_value_heads = text_config.num_key_value_heads
     
-    
     dprint("[Step 4] Running QuaRot + GPTQ quantization...")
+    # import pdb
+    # pdb.set_trace()
+    
     oneshot(
         model=hf_model,
         dataset=ds,
@@ -336,27 +330,28 @@ def main():
         max_seq_length=MAX_SEQUENCE_LENGTH,
         num_calibration_samples=NUM_CALIBRATION_SAMPLES,
         shuffle_calibration_samples=False,
+        pipeline="datafree",
     )
-    import pdb
-    pdb.set_trace()
     # =================================================
     # Step 5: 量化后跑 ATQTA 推理 (验证量化正确性)
     # =================================================
-    dprint("\n[Step 5] Running ATQTA inference AFTER quantization...")
+    dprint("\n✅ [Step 5] Running ATQTA inference 【AFTER】 quantization...")
     run_atqta_infer(omni_model, tokenizer, args.device)
+    
+    # import pdb
+    # pdb.set_trace()
+#     # =================================================
+#     # Step 6: 保存量化模型
+#     # =================================================
+#     dprint(f"[Step 6] Saving quantized model to {SAVE_DIR}...")
+#     from llmcompressor.transformers.compression.compressed_tensors_utils import (
+#         modify_save_pretrained,
+#     )
 
-    # =================================================
-    # Step 6: 保存量化模型
-    # =================================================
-    dprint(f"[Step 6] Saving quantized model to {SAVE_DIR}...")
-    from llmcompressor.transformers.compression.compressed_tensors_utils import (
-        modify_save_pretrained,
-    )
-
-    modify_save_pretrained(hf_model)
-    hf_model.save_pretrained(SAVE_DIR, save_compressed=True)
-    tokenizer.save_pretrained(SAVE_DIR)
-    dprint(f"Quantized model saved to {SAVE_DIR}")
+#     modify_save_pretrained(hf_model)
+#     hf_model.save_pretrained(SAVE_DIR, save_compressed=True)
+#     tokenizer.save_pretrained(SAVE_DIR)
+#     dprint(f"Quantized model saved to {SAVE_DIR}")
 
 
 if __name__ == "__main__":

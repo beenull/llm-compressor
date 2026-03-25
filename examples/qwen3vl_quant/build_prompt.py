@@ -56,7 +56,7 @@ def build_task_prompt(tokenizer, task_type, text_list, audio_text_list, device):
     else:
         raise ValueError(f"task_type {task_type} not supported")
 
-    logger.info(f"Constructed task prompt for {task_type}: {prompt}")
+    # logger.info(f"Constructed task prompt for {task_type}: {prompt}")
 
     text = prompt
     inputs = tokenizer([text], return_tensors="pt").to(device)
@@ -106,7 +106,7 @@ def build_chat_prompt(tokenizer, task_type, messages, device, add_generation_pro
     if add_generation_prompt:
         lines.append("<|im_start|>assistant")
     prompt = "\n".join(lines)
-    logger.info(f"Constructed chat prompt for {task_type}:\n{prompt}")
+    # logger.info(f"Constructed chat prompt for {task_type}:\n{prompt}")
 
     text = prompt
     inputs = tokenizer([text], return_tensors="pt").to(device)
