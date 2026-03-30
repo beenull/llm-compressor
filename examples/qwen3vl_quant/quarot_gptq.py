@@ -23,6 +23,7 @@ import os
 import sys
 
 import torch
+torch.__future__.set_swap_module_params_on_conversion(True)
 from datasets import load_dataset
 
 from llmcompressor import oneshot
@@ -132,6 +133,35 @@ mappings.SPINQUANT_MAPPING_REGISTRY["Qwen3VLForConditionalGeneration"] = (
     )
 )
 
+# #带vit的
+# mappings.SPINQUANT_MAPPING_REGISTRY["Qwen3VLForConditionalGeneration"] = (
+#     mappings.SpinQuantMapping(
+#         mm_proj=[
+#             r"re:.*visual\.merger.*linear_fc2$",
+#             r"re:.*visual\.deepstack_merger_list.*linear_fc2$",
+#         ],
+#         embedding="re:.*embed_tokens$",
+#         attn="re:.*self_attn$",
+#         attn_q="re:.*language_model.*q_proj$",
+#         attn_k="re:.*language_model.*k_proj$",
+#         attn_v="re:.*language_model.*v_proj$",
+#         attn_o="re:.*language_model.*o_proj$",
+#         mlp_in=[
+#             r"re:.*language_model.*mlp\.up_proj$",
+#             r"re:.*language_model.*mlp\.gate_proj$",
+#             r"re:.*visual\.blocks.*mlp\.linear_fc1$",
+#             r"re:.*visual\.deepstack_merger_list.*linear_fc1$",
+#         ],
+#         mlp_out=[
+#             r"re:.*language_model.*mlp\.down_proj$",
+#             r"re:.*visual\.blocks.*mlp\.linear_fc2$",
+#             r"re:.*visual\.deepstack_merger_list.*linear_fc2$",
+#         ],
+#         lm_head="lm_head",
+#     )
+# )
+
+
 norm_mappings.NORM_MAPPING_REGISTRY["Qwen3VLForConditionalGeneration"] = [
     norm_mappings.NormMapping(
         norm="re:.*language_model.*input_layernorm$",
@@ -233,6 +263,9 @@ def main():
         omni_model_ckpt_path=args.omni_model_ckpt,
         device=args.device,
     )
+    
+    import pdb
+    pdb.set_trace()
 
     # 提取内部的 Qwen3VLForConditionalGeneration 用于量化
     # omni_model.language_model 就是 Qwen3VLForConditionalGeneration
@@ -330,11 +363,15 @@ def main():
         max_seq_length=MAX_SEQUENCE_LENGTH,
         num_calibration_samples=NUM_CALIBRATION_SAMPLES,
         shuffle_calibration_samples=False,
-        pipeline="datafree",
+        pipeline="basic",#basic datafree sequential
     )
     # =================================================
     # Step 5: 量化后跑 ATQTA 推理 (验证量化正确性)
     # =================================================
+    
+    import pdb
+    pdb.set_trace()
+    
     dprint("\n✅ [Step 5] Running ATQTA inference 【AFTER】 quantization...")
     run_atqta_infer(omni_model, tokenizer, args.device)
     

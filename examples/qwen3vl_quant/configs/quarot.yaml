@@ -5,11 +5,12 @@ quant_stage:
       rotations: ["R1", "R2", "R4"]
       transform_block_size_R1: 2048
       transform_block_size_R4: 256
-      learnable: False
-      transform_type: "hadamard"  #"random-hadamard" "hadamard"
+      learnable: True
+      transform_type: "random-hadamard"  #"random-hadamard" "hadamard"
+      ignore: ["re:lm_head", "re:.*visual.*","re:.*medusa_head"]
       
 #     AutoRoundModifier:
-#       ignore: ["re:lm_head", "re:.*visual.*"]
+#       ignore: ["re:lm_head", "re:.*visual.*","re:.*medusa_head"]
 #       iters: 200
 #       enable_torch_compile: false
 

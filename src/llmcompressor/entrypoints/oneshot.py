@@ -231,6 +231,14 @@ class Oneshot:
                 calib_data=calibration_dataloader,
                 sequential_targets=self.dataset_args.sequential_targets,
             )
+#             # 关键：把 processor/tokenizer 挂到 session.state
+#             state = session.state
+#             if hasattr(self, 'processor') and self.processor is not None:
+#                 state.processor = self.processor
+#             if hasattr(self, 'model') and hasattr(self.model, 'tokenizer') and self.model.tokenizer is not None:
+#                 state.tokenizer = self.model.tokenizer
+
+            
             user_pipeline = self.dataset_args.pipeline
             pipeline = CalibrationPipeline.from_modifiers(
                 session.lifecycle.recipe.modifiers, user=user_pipeline
@@ -408,6 +416,7 @@ def oneshot(
     local_args = {
         k: v for k, v in locals().items() if k not in ("local_args", "kwargs")
     }
+    
     one_shot = Oneshot(**local_args, **kwargs)
     one_shot()
 
